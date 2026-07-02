@@ -639,9 +639,11 @@ class KlaviyoFlutterSdkPlugin :
         // (e.g. a retained FlutterEngine re-attaching), skip it so we don't
         // re-emit or re-cache the push-opened event (#86).
         binding.activity.intent?.let { intent ->
-            if (intent !== handledLaunchIntent) {
+            // Mark the intent handled only after handleIntent succeeds, so a
+            // failed cold-start open can still be retried on a later re-attach
+            // with the same intent instead of being silently skipped (#86).
+            if (intent !== handledLaunchIntent && handleIntent(intent)) {
                 handledLaunchIntent = intent
-                handleIntent(intent)
             }
         }
 
@@ -649,8 +651,9 @@ class KlaviyoFlutterSdkPlugin :
         binding.addOnNewIntentListener { intent ->
             // Track warm-start intents so that if onAttachedToActivity fires
             // after setIntent() updates activity.intent, we don't double-handle.
-            handledLaunchIntent = intent
-            handleIntent(intent)
+            if (handleIntent(intent)) {
+                handledLaunchIntent = intent
+            }
             false // Return false to allow other listeners
         }
     }
@@ -666,8 +669,9 @@ class KlaviyoFlutterSdkPlugin :
         Registry.lifecycleMonitor.assignCurrentActivity(binding.activity)
 
         binding.addOnNewIntentListener { intent ->
-            handledLaunchIntent = intent
-            handleIntent(intent)
+            if (handleIntent(intent)) {
+                handledLaunchIntent = intent
+            }
             false
         }
     }
@@ -676,8 +680,12 @@ class KlaviyoFlutterSdkPlugin :
         activity = null
     }
 
-    private fun handleIntent(intent: Intent) {
-        try {
+    // Returns true only if the intent was processed to completion. Callers use
+    // this to decide whether to mark the intent handled: a failure must not
+    // suppress a retry on a subsequent re-attach, or the cold-start
+    // push-opened event could be permanently lost (#86).
+    private fun handleIntent(intent: Intent): Boolean {
+        return try {
             // Let Klaviyo SDK handle push notification opens (attribution, open event).
             Klaviyo.handlePush(intent)
 
@@ -722,8 +730,10 @@ class KlaviyoFlutterSdkPlugin :
                     cachedPushOpened = eventData
                 }
             }
+            true
         } catch (e: Exception) {
             Registry.log.error("Error handling push: ${e.message}", e)
+            false
         }
     }
 }
